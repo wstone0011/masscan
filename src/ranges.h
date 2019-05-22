@@ -1,6 +1,7 @@
 #ifndef RANGES_H
 #define RANGES_H
 #include <stdint.h>
+#include <stdio.h>
 
 /**
  * A range of either IP addresses or ports
@@ -196,6 +197,12 @@ rangelist_merge(struct RangeList *list1, const struct RangeList *list2);
 void
 rangelist_optimize(struct RangeList *targets);
 
+
+/**
+ * Sorts the list of target. We maintain the list of targets in sorted
+ * order internally even though we scan the targets in random order
+ * externally.
+ */
 void
 rangelist_sort(struct RangeList *targets);
 

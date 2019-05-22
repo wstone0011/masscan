@@ -4,6 +4,7 @@
 #include "ranges.h"
 #include "util-malloc.h"
 #include "templ-port.h"
+#include "logger.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -109,23 +110,51 @@ void
 rangelist_sort(struct RangeList *targets)
 {
     size_t i;
+    struct RangeList newlist = {0};
+    unsigned original_count = targets->count;
 
     if (targets->count == 0)
         return;
-
+    
+    if (targets->is_sorted) {
+        //LOG(2, "[+] range:sort: already sorted\n");
+        return;
+    }
+    
+    LOG(3, "[+] range:sort: sorting...\n");
+    
     /* First, sort the list */
     qsort(  targets->list,              /* the array to sort */
             targets->count,             /* number of elements to sort */
             sizeof(targets->list[0]),   /* size of element */
             range_compare);
 
-    /* Second, combine all overlapping ranges*/
+    LOG(3, "[+] range:sort: combining...\n");
+    
+    
+    /* Second, combine all overlapping ranges. We do this by simply creating
+     * a new list from a sorted list, so we don't have to remove things in the
+     * middle when collapsing overlapping entries together, which is painfully
+     * slow. */
     for (i=0; i<targets->count; i++) {
-        while (i+1<targets->count && range_is_overlap(targets->list[i], targets->list[i+1])) {
+        rangelist_add_range(&newlist, targets->list[i].begin, targets->list[i].end);
+        
+        /*while (i+1<targets->count && range_is_overlap(targets->list[i], targets->list[i+1])) {
             range_combine(&targets->list[i], targets->list[i+1]);
             rangelist_remove_at(targets, i+1);
-        }
+            fprintf(stderr, " count=%u\n", targets->count);
+        }*/
+        
     }
+    
+    LOG(3, "[+] range:sort: combined from %u elements to %u elements\n", original_count, newlist.count);
+    
+    free(targets->list);
+    targets->list = newlist.list;
+    targets->count = newlist.count;
+    newlist.list = 0;
+
+    LOG(2, "[+] range:sort: done...\n");
 
     targets->is_sorted = 1;
 }
@@ -158,8 +187,10 @@ rangelist_add_range(struct RangeList *targets, unsigned begin, unsigned end)
     /* If new range overlaps the last range in the list, then combine it
      * rather than appending it. This is an optimization for the fact that
      * we often read in sequential addresses */
-    if (range_is_overlap(targets->list[targets->count], range)) {
-        range_combine(&targets->list[targets->count], range);
+    if (range_is_overlap(targets->list[targets->count - 1], range)) {
+        range_combine(&targets->list[targets->count - 1], range);
+        targets->is_sorted = 0;
+        return;
     }
 
     /* append to the end of our list */
@@ -397,6 +428,7 @@ parse_ipv4(const char *line, unsigned *inout_offset, unsigned max, unsigned *ipv
 
     return 0; /* parse ok */
 }
+
 
 /****************************************************************************
  * Parse from text an IPv4 address range. This can be in one of several
@@ -784,6 +816,9 @@ rangelist_parse_ports(struct RangeList *ports, const char *string, unsigned *is_
                 case 'S': case 's':
                     proto_offset = Templ_SCTP;
                     break;
+                case 'O': case 'o':
+                    proto_offset = Templ_Oproto_first;
+                    break;
                 case 'I': case 'i':
                     proto_offset = Templ_ICMP_echo;
                     break;
@@ -805,7 +840,11 @@ rangelist_parse_ports(struct RangeList *ports, const char *string, unsigned *is_
             end = (unsigned)strtoul(p, &p, 0);
         }
 
-        if (port > 0xFFFF || end > 0xFFFF || end < port) {
+        if (port > 0xFF && proto_offset == Templ_Oproto_first) {
+            fprintf(stderr, "bad ports: %u-%u\n", port, end);
+            *is_error = 2;
+            return p;
+        } else if (port > 0xFFFF || end > 0xFFFF || end < port) {
             fprintf(stderr, "bad ports: %u-%u\n", port, end);
             *is_error = 2;
             return p;
@@ -821,9 +860,8 @@ rangelist_parse_ports(struct RangeList *ports, const char *string, unsigned *is_
     return p;
 }
 
-
 /***************************************************************************
- * Called during "make regress" to run a regression test over this module.
+ * Called during "make test" to run a regression test over this module.
  ***************************************************************************/
 int
 ranges_selftest(void)

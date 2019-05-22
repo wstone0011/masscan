@@ -14,6 +14,7 @@
 #include "masscan.h"
 #include "masscan-version.h"
 #include "ranges.h"
+#include "range-file.h"     /* reads millions of IP addresss from a file */
 #include "string_s.h"
 #include "logger.h"
 #include "proto-banner1.h"
@@ -27,6 +28,11 @@
 #include "util-malloc.h"
 #include <ctype.h>
 #include <limits.h>
+
+#ifdef WIN32
+#include <direct.h>
+#define getcwd _getcwd
+#endif
 
 #ifndef min
 #define min(a,b) ((a)<(b)?(a):(b))
@@ -326,7 +332,7 @@ masscan_save_state(struct Masscan *masscan)
 }
 
 
-
+#if 0
 /*****************************************************************************
  * Read in ranges from a file
  *
@@ -430,6 +436,7 @@ ranges_from_file(struct RangeList *ranges, const char *filename)
      * before it can be used */
     rangelist_sort(ranges);
 }
+#endif
 
 /***************************************************************************
  ***************************************************************************/
@@ -1787,6 +1794,13 @@ masscan_set_parameter(struct Masscan *masscan,
         if (masscan->op == 0)
             masscan->op = Operation_Scan;
     }
+    else if (EQUALS("oprotos", name) || EQUALS("oproto", name)) {
+        unsigned is_error = 0;
+        masscan->scan_type.oproto = 1;
+        rangelist_parse_ports(&masscan->ports, value, &is_error, Templ_Oproto_first);
+        if (masscan->op == 0)
+            masscan->op = Operation_Scan;
+    }
     else if (EQUALS("tcp-ports", name) || EQUALS("tcp-port", name)) {
         unsigned is_error = 0;
         masscan->scan_type.tcp = 1;
@@ -1933,11 +1947,21 @@ masscan_set_parameter(struct Masscan *masscan,
     } else if (EQUALS("excludefile", name)) {
         unsigned count1 = masscan->exclude_ip.count;
         unsigned count2;
+        int err;
+        const char *filename = value;
+
         LOG(1, "EXCLUDING: %s\n", value);
-        ranges_from_file(&masscan->exclude_ip, value);
+        err = rangefile_read(filename, &masscan->exclude_ip, &masscan->exclude_ipv6);
+        if (err) {
+            LOG(0, "FAIL: error reading from exclude file\n");
+            exit(1);
+        }
+
+        /* Detect if this file has made any change, otherwise don't print
+         * a message */
         count2 = masscan->exclude_ip.count;
         if (count2 - count1)
-        fprintf(stderr, "%s: excluding %u ranges from file\n",
+            fprintf(stderr, "%s: excluding %u ranges from file\n",
                 value, count2 - count1);
     } else if (EQUALS("heartbleed", name)) {
         masscan->is_heartbleed = 1;
@@ -1997,7 +2021,14 @@ masscan_set_parameter(struct Masscan *masscan,
     } else if (EQUALS("iflist", name)) {
         masscan->op = Operation_List_Adapters;
     } else if (EQUALS("includefile", name)) {
-        ranges_from_file(&masscan->targets, value);
+        int err;
+        const char *filename = value;
+
+        err = rangefile_read(filename, &masscan->targets, &masscan->targets_ipv6);
+        if (err) {
+            LOG(0, "FAIL: error reading from include file\n");
+            exit(1);
+        }
         if (masscan->op == 0)
             masscan->op = Operation_Scan;
     } else if (EQUALS("infinite", name)) {
@@ -2300,8 +2331,10 @@ masscan_load_database_files(struct Masscan *masscan)
     if (filename) {
         if (masscan->payloads.udp == NULL)
             masscan->payloads.udp = payloads_udp_create();
-    
-        payloads_read_pcap(filename, masscan->payloads.udp);
+        if (masscan->payloads.oproto == NULL)
+            masscan->payloads.oproto = payloads_udp_create();
+
+        payloads_read_pcap(filename, masscan->payloads.udp, masscan->payloads.oproto);
     }
 
     /*
@@ -2626,9 +2659,9 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                     case 'N':
                         fprintf(stderr, "nmap(%s): NULL scan not yet supported\n", argv[i]);
                         exit(1);
-                    case 'O':
-                        fprintf(stderr, "nmap(%s): IP proto scan not yet supported\n", argv[i]);
-                        exit(1);
+                    case 'O': /* Other IP protocols (not ICMP, UDP, TCP, or SCTP) */
+                        masscan->scan_type.oproto = 1;
+                        break;
                     case 'S': /* TCP SYN scan - THIS IS WHAT WE DO! */
                         masscan->scan_type.tcp = 1;
                         break;
@@ -2720,7 +2753,8 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
      * If no other "scan type" found, then default to TCP
      */
     if (masscan->scan_type.udp == 0 && masscan->scan_type.sctp == 0
-        && masscan->scan_type.ping == 0 && masscan->scan_type.arp == 0)
+        && masscan->scan_type.ping == 0 && masscan->scan_type.arp == 0
+        && masscan->scan_type.oproto == 0)
         masscan->scan_type.tcp = 1;
     
     /*
@@ -2798,6 +2832,11 @@ masscan_echo(struct Masscan *masscan, FILE *fp, unsigned is_echo_all)
                 rrange.end -= Templ_UDP;
                 fprintf(fp,"U:");
                 range.begin = Templ_SCTP;
+            } else if (Templ_Oproto_first <= rrange.begin && rrange.begin <= Templ_Oproto_last) {
+                rrange.begin -= Templ_Oproto_first;
+                rrange.end -= Templ_Oproto_first;
+                fprintf(fp, "O:");
+                range.begin = Templ_Oproto_first;
             } else
                 range.begin = Templ_UDP;
             rrange.end = min(rrange.end, 65535);
@@ -2885,7 +2924,10 @@ masscan_read_config_file(struct Masscan *masscan, const char *filename)
 
     err = fopen_s(&fp, filename, "rt");
     if (err) {
+        char dir[512];
         perror(filename);
+        getcwd(dir, sizeof(dir));
+        fprintf(stderr, "cwd = %s\n", dir);
         return;
     }
 
